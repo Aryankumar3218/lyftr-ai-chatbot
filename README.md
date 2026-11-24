@@ -1,126 +1,301 @@
 # Lyftr AI — LLM Chatbot with Key Failover and Response Caching
 
-A React + FastAPI + SQLite chatbot built to the assignment contract. It keeps multi-turn state, exposes per-request inference metadata, uses LiteLLM response caching, and falls back across a pool of provider API keys.
+A full-stack AI chatbot built with **React, FastAPI, SQLite, and LiteLLM**.
+
+The application supports multi-turn conversations, per-request token and latency tracking, LiteLLM response caching, automatic API-key failover, simulated provider failures, and SQLite-backed session history.
+
+---
 
 ## 1. Live URLs
 
-- Frontend: `ADD_DEPLOYED_FRONTEND_URL`
-- Backend: `ADD_DEPLOYED_BACKEND_URL`
-- Health: `ADD_DEPLOYED_BACKEND_URL/health`
+- **Frontend:** https://frontend-sooty-alpha-1atr6g6esc.vercel.app
+- **Backend:** https://lyftr-ai-chatbot-backend.onrender.com
+- **Health Check:** https://lyftr-ai-chatbot-backend.onrender.com/health
+
+> Note: The backend is currently deployed on Render's free tier. Free instances may spin down after inactivity, so the first request after a period of inactivity can take longer.
+
+---
 
 ## 2. Run locally: with Docker and without
 
-### Docker
+### Run with Docker
+
+Clone the repository and create the environment file:
 
 ```bash
 cp .env.example .env
-# Replace LLM_API_KEYS with at least two real keys.
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Update `.env` with at least two real provider API keys:
+
+```env
+LLM_API_KEYS=your_first_key,your_second_key
+LLM_MODEL=gemini/gemini-3.5-flash-lite
+DATABASE_URL=sqlite:////data/app.db
+ALLOWED_ORIGINS=http://localhost:3000
+ENABLE_FAILURE_SIMULATION=true
+DEFAULT_SYSTEM_PROMPT=You are a helpful assistant.
+VITE_API_URL=http://localhost:8000
+```
+
+Never commit real API keys to Git.
+
+Start the complete stack:
+
+```bash
 make up
 ```
 
-Frontend: http://localhost:3000  
-Backend: http://localhost:8000
+Local URLs:
 
-Stop with `make down`.
+- Frontend: http://localhost:3000
+- Backend: http://localhost:8000
+- Health: http://localhost:8000/health
 
-### Without Docker
+Stop the stack with:
 
-Backend:
+```bash
+make down
+```
+
+The Docker Compose configuration mounts a named volume at `/data` for the SQLite database.
+
+### Run without Docker
+
+#### Backend
+
 ```bash
 cd backend
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
-export DATABASE_URL=sqlite:////tmp/lyftr.db
-export LLM_API_KEYS=key1,key2
-export ENABLE_FAILURE_SIMULATION=true
+```
+
+Set the required environment variables and start FastAPI:
+
+```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-Frontend:
+#### Frontend
+
+Open another terminal:
+
 ```bash
 cd frontend
 npm install
-VITE_API_URL=http://localhost:8000 npm run dev
+npm run dev
 ```
+
+Set `VITE_API_URL=http://localhost:8000` when running the frontend locally.
+
+---
 
 ## 3. Design decisions: key fallback, caching, SQLite session storage
 
-- **Key fallback:** `LLM_API_KEYS` is an ordered pool (`key_1`, `key_2`, ...). `/chat` tries the next key after a 429/quota/5xx-style provider failure. Provider keys are never returned to clients; only their safe IDs are returned.
-- **Caching:** LiteLLM's built-in disk cache is enabled. The model and full message list determine an exact request. A cache hit returns `LLM_CACHE`, `key_id: null`, and `fallback_attempts: 0`.
-- **SQLite:** Messages are persisted in the `messages` table under the path specified by `DATABASE_URL`. Docker mounts `/data` as a named volume, so session history and the disk cache survive container restarts.
-- **Session context:** The client sends only the new message. The backend reconstructs the full prompt from SQLite using `session_id`.
+### Key fallback
+
+`LLM_API_KEYS` contains an ordered pool of provider API keys.
+
+For example:
+
+```text
+key_1 → key_2 → key_3
+```
+
+The actual API keys are never returned to the frontend.
+
+Instead, safe identifiers such as:
+
+```text
+key_1
+key_2
+```
+
+are included in response metadata.
+
+If a provider request fails because of a retryable error such as:
+
+- HTTP 429
+- quota/rate-limit errors
+- HTTP 500
+- HTTP 502
+- HTTP 503
+
+the backend automatically attempts the next configured API key.
+
+If every configured key fails, the API returns:
+
+```json
+{
+  "detail": "all providers unavailable"
+}
+```
+
+with HTTP status `503`.
+
+Failed requests are not written to session history.
+
+### Response caching
+
+The project uses **LiteLLM's built-in local exact-match cache**.
+
+The effective cache request is based on the model and the full message list sent to the LLM, including:
+
+- system prompt
+- previous conversation history
+- new user message
+
+A new request returns:
+
+```text
+LIVE_INFERENCE
+```
+
+An identical eligible request served from LiteLLM's cache returns:
+
+```text
+LLM_CACHE
+```
+
+For cache hits:
+
+```text
+key_id = null
+fallback_attempts = 0
+```
+
+Token usage stored with the cached response is returned again.
+
+Cache hits are significantly faster than live provider requests.
+
+### SQLite session storage
+
+Conversation history is stored in SQLite.
+
+The primary table is:
+
+```sql
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT,
+    created_at TEXT NOT NULL
+);
+```
+
+An index on:
+
+```text
+(session_id, id)
+```
+
+supports efficient ordered session-history retrieval.
+
+With Docker, the database is configured as:
+
+```text
+sqlite:////data/app.db
+```
+
+and `/data` is backed by the Docker Compose named volume.
+
+### Multi-turn session context
+
+The frontend sends only the latest user message together with the `session_id`.
+
+The backend retrieves previous messages for that session from SQLite and reconstructs the complete conversation before sending it to the LLM.
+
+Different session IDs remain isolated from one another.
+
+---
 
 ## 4. Verification: how to see failover, cache hits and per-message token usage
 
-Health:
+### Health check
+
+Local:
+
 ```bash
 curl http://localhost:8000/health
 ```
 
-Live inference:
-```bash
-curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' \
-  -d '{"session_id":"demo-1","message":"What is the capital of France?"}'
-```
-
-Cache hit: send the same first message in a fresh session:
-```bash
-curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' \
-  -d '{"session_id":"demo-2","message":"What is the capital of France?"}'
-```
-Look for `metadata.resolution_source = LLM_CACHE` and `key_id = null`.
-
-Failover:
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' -H 'X-Simulate-Failure: key_1=429' \
-  -d '{"session_id":"failover-1","message":"Say hello in one sentence."}'
-```
-With two configured keys, expect HTTP 200, `key_id = key_2`, and `fallback_attempts = 1`.
-
-All keys unavailable:
-```bash
-curl -i -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' -H 'X-Simulate-Failure: *=429' \
-  -d '{"session_id":"fail-all","message":"hello"}'
-```
-Expect HTTP 503 and `{"detail":"all providers unavailable"}`; the failed request is not stored.
-
-History:
-```bash
-curl http://localhost:8000/sessions/demo-1/messages
-```
-
-The frontend renders `resolution_source`, model, latency, input tokens and output tokens beside each assistant reply.
-
-## 5. Setup Used: your editor and AI tools
-
-- Editor: `ADD_YOUR_EDITOR`
-- AI tools: ChatGPT / `EDIT_IF_NEEDED`
-
-## 6. Bonus features (if any): what you added beyond the requirements and why
-
-- Responsive dark UI with clear inference metadata chips.
-- Optional per-request system prompt input.
-- Index on `(session_id, id)` for efficient ordered history reads.
-
-## API contract
-
-Exactly three endpoints are exposed:
-- `GET /health`
-- `POST /chat`
-- `GET /sessions/{session_id}/messages`
-
-## Tests
+Deployed:
 
 ```bash
-cd backend
-pytest -q
+curl https://lyftr-ai-chatbot-backend.onrender.com/health
 ```
 
-The included tests verify health, validation, unknown-session behavior, and that simulated all-key failure returns 503 without writing history.
+Expected response:
 
-## Deployment notes
+```json
+{
+  "status": "ok",
+  "keys_configured": 2,
+  "cache_enabled": true
+}
+```
 
-Deploy the frontend to Vercel/Netlify/Render and the backend to a container host with persistent disk support. Set `DATABASE_URL=sqlite:////data/app.db`, mount persistent storage at `/data`, set `ALLOWED_ORIGINS` to the public frontend origin, and keep `ENABLE_FAILURE_SIMULATION=true` for assignment verification. Build the frontend with `VITE_API_URL` pointing to the deployed backend.
+### Live inference
+
+```bash
+curl -X POST https://lyftr-ai-chatbot-backend.onrender.com/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"demo-live-1","message":"Name one planet in our solar system."}'
+```
+
+A new request should contain:
+
+```json
+{
+  "resolution_source": "LIVE_INFERENCE"
+}
+```
+
+The metadata also contains:
+
+- model
+- latency_ms
+- input_tokens
+- output_tokens
+- key_id
+- fallback_attempts
+
+### Cache hit
+
+First send a message in a new session:
+
+```bash
+curl -X POST https://lyftr-ai-chatbot-backend.onrender.com/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"cache-demo-1","message":"Name one planet in our solar system."}'
+```
+
+Then send the identical first message in another new session:
+
+```bash
+curl -X POST https://lyftr-ai-chat
