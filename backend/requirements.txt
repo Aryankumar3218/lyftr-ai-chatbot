@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+litellm[caching]==1.109.3
+pydantic==2.11.10
+pytest==8.3.4
+httpx==0.28.1
+orjson==3.10.15
+soundfile==0.13.1
